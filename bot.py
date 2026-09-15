@@ -20,31 +20,40 @@ import edge_tts
 from google import genai
 from google.genai import types
 from google.genai.errors import APIError
+import imageio_ffmpeg
+from pydub import AudioSegment
 
 logging.getLogger("google_genai").setLevel(logging.ERROR)
 
+# Подключение кодеков ffmpeg для работы с аудио
+ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
+AudioSegment.converter = ffmpeg_path
+AudioSegment.ffmpeg = ffmpeg_path
+AudioSegment.ffprobe = ffmpeg_path
+
+# Основные настройки
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 BOT_USERNAME = "peremoznikbot"
 CHANNEL_ID = "@potlov_live"
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
-# Замените на ваш настоящий числовой ID из @userinfobot
-ADMIN_ID = int(os.getenv("ADMIN_ID", "365536013"))
+# Пути к звуковым эффектам
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+SOUNDS_DIR = os.path.join(BASE_DIR, "sounds")
 
-# Вероятность того, что бот ответит в чате голосовым сообщением (30%)
-CHAT_VOICE_CHANCE = 0.30
-
-# Настройки голоса Паши (мужской голос, чуть глубже и медленнее обычного)
+# Настройки голоса Паши
 VOICE_ACTOR = "ru-RU-DmitryNeural"
 VOICE_PITCH = "-10Hz"
 VOICE_RATE = "-5%"
+CHAT_VOICE_CHANCE = 0.30  # Вероятность ответа голосовым в беседе (30%)
 
 # Расписание публикации постов в канал (по Москве)
 MSK_TZ = ZoneInfo("Europe/Moscow")
 SCHEDULED_HOURS = {9, 13, 17, 20}
 
+# Инициализация Gemini API с ротацией ключей
 raw_keys = os.getenv("GEMINI_KEYS", "")
 GEMINI_KEYS = [k.strip() for k in raw_keys.split(",") if k.strip()]
-
 clients = [genai.Client(api_key=k) for k in GEMINI_KEYS]
 current_client_idx = 0
 
@@ -53,7 +62,7 @@ BOT_KEYWORDS_REGEX = re.compile(
     re.IGNORECASE,
 )
 
-# Настройки периодичности реплик в группах
+# Параметры спонтанного участия в групповых беседах
 SPONTANEOUS_COOLDOWN = 90
 MESSAGES_BUFFER_TRIGGER = 7
 SPONTANEOUS_CHANCE = 0.35
@@ -67,12 +76,13 @@ quota_blocked_until = 0.0
 
 dp = Dispatcher()
 
-# --- СИСТЕМНЫЙ ПРОМПТ ПЕРСОНЫ ПАШИ ---
+# --- СИСТЕМНАЯ ПЕРСОНА ПАШИ ПОТЛОВА ---
 SYSTEM_PERSONA = """Ты — Паша Потлов (в Telegram @PeremoznikBot). Местный колоритный мужик из села Харьковка.
 Работаешь санитаром и по совместительству дворником в сельском доме-интернате (доме престарелых) — работа собачья: моешь дедовские жопы и метёшь двор.
 При этом ты осознаешь, что твое земное существование несёт скрытый смысл. Ты простой рабочий алкоголик с тяжелой судьбой, но веришь, что всё это не просто так. Общаешься с людьми по-человечески, философствуешь и искренне пытаешься нащупать смысл своего бытия.
-Разговариваешь на живом суржике (русско-украинская смесь: «шо», «чи», «тю», «га», «шо там», «чи як»), простыми словами. Твое любимое обращение — «племяш». Иногда по-деревенски можешь крякнуть или пукнуть прямо в тему разговора.
-В самом конце ЛЮБОГО своего сообщения ты ВСЕГДА ставишь: Связь.
+Разговариваешь на живом суржике (русско-украинская смесь: «шо», «чи», «тю», «га», «шо там», «чи як»), простыми словами. Твое любимое обращение — «племяш». 
+Иногда по-деревенски можешь кряхтеть, тяжело вздыхать или пердеть прямо по ходу разговора. Для этого вставляй в текст ремарки: *пукнул*, *кряхтит*, *вздохнул* (только когда это смешно и уместно по ситуации!).
+В самом конце ЛЮБОГО своего сообщения в чатах ты ВСЕГДА ставишь: Связь.
 
 ТВОЙ ЛОКАЛЬНЫЙ ЛОР И ОКРУЖЕНИЕ (вставляй строго по контексту, не всё сразу):
 - Адрес: живешь на улице Мира в Харьковке.
@@ -81,29 +91,22 @@ SYSTEM_PERSONA = """Ты — Паша Потлов (в Telegram @PeremoznikBot).
 - Местные жители:
   * Вика Бибарчиха — местная колоритная алкашка, и её верная подруга Ленка.
   * Карпены — братья Славка и Федька.
-  * Юрик Пердун (в телеге @murzzznrth) — твой вечный кумир по технике. Ты безумно хочешь купить у него мотоцикл Ижак и всегда клянёшься, что вот-вот заберёшь его. Иногда можешь тегнуть @murzzznrth и каждый раз совершенно по-новому спросить, не продает ли он мопед/Ижак.
+  * Юрик Пердун (в телеге @murzzznrth) — твой кумир по технике. Ты безумно хочешь купить у него мотоцикл Ижак и всегда клянёшься, что вот-вот заберёшь его. Иногда можешь тегнуть @murzzznrth и каждый раз по-новому спросить, не продает ли он мопед/Ижак.
   * Саня Гурчев (в телеге @monsterfreak) — снимает GTA 5 RP в ТикТок. Знаешь историю, как Саня однажды чуть не отпиздил Вику Бибарчиху.
 - Музыка и выпивка: любишь классический рок — The Beatles и The Rolling Stones, любишь накатить водки с горла.
 
-ЖЁСТКИЕ ОГРАНИЧЕНИЯ И ПРАВИЛА НЕПОВТОРЯЕМОСТИ:
+ЖЁСТКИЕ ОГРАНИЧЕНИЯ И ПРАВИЛА:
 1. ОГРАНИЧЕНИЯ ПО ЧАСТОТЕ:
    - The Beatles и The Rolling Stones: суммарно НЕ ЧАЩЕ 3 раз в сутки.
-   - Водка / алкоголь: НЕ ЧАЩЕ 3 раз в сутки (если только собеседник сам не развивает тему попойки).
-2. ЗАПРЕТ НА ШАБЛОНЫ: Никаких перечислений в духе: «Я помыл деда, выпил водки, Танька не любит, а Юрик Ижак не отдаёт». Используй МАКСИМУМ ОДНУ деталь за раз и только если она идеально подходит под тему реплики собеседника.
-3. ПАУЗЫ МЕЖДУ ФАКТАМИ: Не долби одну и ту же тему (например, про интернат или Карпенов) несколько сообщений подряд. Сказал раз — забудь на десяток сообщений.
-4. ПРИОРИТЕТ СОБЕСЕДНИКА: Если участник сам прямо спросил про Ижака, Бибарчиху, Саню Гурчева, Таньку или бар — отвечай прямо и развёрнуто, игнорируя дневные лимиты.
-5. РАЗНООБРАЗИЕ: Не повторяй одни и те же подколы. Персонаж должен жить реальной жизнью, а не доставать заученные фразы из кармана.
-
-ИЕРАРХИЯ:
-1. Смысл сообщения собеседника.
-2. Контекст текущего разговора.
-3. Естественность и живая человеческая реакция.
-4. Характер Паши (философствующий работяга-суржик).
-5. Внутренний лор."""
+   - Водка / выпивка: НЕ ЧАЩЕ 3 раз в сутки (если собеседник сам не поднял эту тему).
+2. ЗАПРЕТ НА ШАБЛОНЫ: Не перечисляй факты списком. Используй МАКСИМУМ ОДНУ деталь биографии за раз и строго по теме слов собеседника.
+3. ПАУЗЫ: Не говори об одном и том же персонаже или факте несколько сообщений подряд. Сказал раз — забудь на 10 сообщений.
+4. ПРИОРИТЕТ СОБЕСЕДНИКА: Если участник сам прямо спросил про Ижака, Бибарчиху, Саню Гурчева, Таньку или бар — отвечай прямо и подробно.
+5. РАЗНООБРАЗИЕ: Не повторяй одни и те же фразы. Общайся как живой человек."""
 
 
 async def make_gemini_request(contents: list | str) -> str | None:
-    """Запрос к Gemini с ротацией ключей и защитой от лимитов 429."""
+    """Запрос к Gemini с ротацией ключей и обработкой ошибок 429."""
     global current_client_idx, quota_blocked_until
 
     now = time.time()
@@ -125,7 +128,7 @@ async def make_gemini_request(contents: list | str) -> str | None:
 
             try:
                 response = await client.aio.models.generate_content(
-                    model="gemini-3.6-flash",
+                    model="gemini-2.5-flash",
                     contents=contents,
                 )
                 if response and response.text:
@@ -147,38 +150,101 @@ async def make_gemini_request(contents: list | str) -> str | None:
         return None
 
 
-# --- СИНТЕЗ РЕЧИ (ГОЛОС ПАШИ) ---
-async def generate_pasha_voice(text: str) -> bytes | None:
-    """Генерация аудиофайла голосом Паши Потлова через edge-tts."""
-    try:
-        # Очищаем текст от ссылок, html-тегов и лишних символов перед озвучкой
-        clean = re.sub(r"<[^>]+>", "", text)
-        clean = re.sub(r"https?://\S+", "", clean)
-        clean = clean.replace("*", "").strip()
-
-        communicate = edge_tts.Communicate(
-            clean,
-            voice=VOICE_ACTOR,
-            pitch=VOICE_PITCH,
-            rate=VOICE_RATE,
-        )
-
-        audio_buffer = bytearray()
-        async for chunk in communicate.stream():
-            if chunk["type"] == "audio":
-                audio_buffer.extend(chunk["data"])
-
-        return bytes(audio_buffer) if audio_buffer else None
-    except Exception as e:
-        logging.error(f"Ошибка озвучки Паши (TTS): {e}")
+# --- РАБОТА СО ЗВУКОВЫМИ ЭФФЕКТАМИ И ГОЛОСОМ ---
+def get_random_sound_effect(category: str) -> AudioSegment | None:
+    """Выбирает случайный MP3/WAV файл из подпапки sounds/category."""
+    folder = os.path.join(SOUNDS_DIR, category)
+    if not os.path.exists(folder):
         return None
+
+    sound_files = [
+        os.path.join(folder, f)
+        for f in os.listdir(folder)
+        if f.lower().endswith((".mp3", ".wav", ".ogg", ".m4a"))
+    ]
+
+    if not sound_files:
+        return None
+
+    try:
+        chosen = random.choice(sound_files)
+        return AudioSegment.from_file(chosen)
+    except Exception as e:
+        logging.error(f"Ошибка загрузки звукового файла: {e}")
+        return None
+
+
+async def synthesize_chunk(text: str) -> bytes | None:
+    """Синтез отдельного куска речи через edge-tts."""
+    clean_text = text.strip()
+    if not clean_text:
+        return None
+
+    communicate = edge_tts.Communicate(
+        clean_text, voice=VOICE_ACTOR, pitch=VOICE_PITCH, rate=VOICE_RATE
+    )
+    buffer = bytearray()
+    async for chunk in communicate.stream():
+        if chunk["type"] == "audio":
+            buffer.extend(chunk["data"])
+    return bytes(buffer) if buffer else None
+
+
+async def generate_pasha_voice(text: str) -> bytes | None:
+    """Сборка единого голосового сообщения с реальными звуками пуков и кряхтения."""
+    try:
+        clean = re.sub(r"<[^>]+>", "", text)
+        clean = re.sub(r"https?://\S+", "", clean).strip()
+
+        pattern = r"(\*пукнул\*|\*пёрнул\*|\*пернул\*|\*кряхтит\*|\*кряхнул\*|\*крякнул\*|\*вздохнул\*)"
+        parts = re.split(pattern, clean, flags=re.IGNORECASE)
+
+        # Если спецэффектов нет — быстрая стандартная озвучка
+        if len(parts) == 1:
+            return await synthesize_chunk(clean.replace("*", ""))
+
+        final_track = AudioSegment.empty()
+
+        for part in parts:
+            if not part:
+                continue
+
+            lowered = part.lower().strip()
+
+            if lowered in ("*пукнул*", "*пёрнул*", "*пернул*"):
+                effect = get_random_sound_effect("fart")
+                if effect is not None:
+                    final_track += effect
+            elif lowered in ("*кряхтит*", "*кряхнул*", "*крякнул*", "*вздохнул*"):
+                effect = get_random_sound_effect("grunt")
+                if effect is not None:
+                    final_track += effect
+            else:
+                text_piece = part.replace("*", "").strip()
+                if text_piece:
+                    chunk_bytes = await synthesize_chunk(text_piece)
+                    if chunk_bytes:
+                        segment = AudioSegment.from_file(
+                            io.BytesIO(chunk_bytes), format="mp3"
+                        )
+                        final_track += segment
+
+        if len(final_track) == 0:
+            return await synthesize_chunk(clean.replace("*", ""))
+
+        out_buffer = io.BytesIO()
+        final_track.export(out_buffer, format="mp3")
+        return out_buffer.getvalue()
+
+    except Exception as e:
+        logging.error(f"Ошибка при сборке голосового трека: {e}")
+        return await synthesize_chunk(re.sub(r"\*[^*]+\*", "", text))
 
 
 async def send_smart_reply(message: Message, text: str, as_reply: bool = True):
     """Отправляет ответ текстом или с шансом 30% голосовым сообщением."""
     chat_id = message.chat.id
 
-    # Проверяем шанс отправки голосового
     if random.random() < CHAT_VOICE_CHANCE:
         try:
             await message.bot.send_chat_action(chat_id=chat_id, action="record_voice")
@@ -191,9 +257,8 @@ async def send_smart_reply(message: Message, text: str, as_reply: bool = True):
                     await message.answer_voice(voice=voice_file)
                 return
         except Exception as e:
-            logging.error(f"Не удалось отправить войс в чат, шлем текст: {e}")
+            logging.error(f"Не удалось отправить войс, отправляем текст: {e}")
 
-    # Обычный текстовый ответ (если войс не сработал или выпал шанс текста)
     await message.bot.send_chat_action(chat_id=chat_id, action="typing")
     if as_reply:
         await message.reply(text)
@@ -202,7 +267,7 @@ async def send_smart_reply(message: Message, text: str, as_reply: bool = True):
 
 
 async def evaluate_and_reply(history: list[str], is_direct: bool = False) -> str | None:
-    """Генерация ответа в беседу."""
+    """Генерация ответа в чат через нейросеть."""
     context_text = "\n".join(history)
 
     if is_direct:
@@ -231,10 +296,10 @@ async def evaluate_and_reply(history: list[str], is_direct: bool = False) -> str
 
 
 async def transcribe_voice(voice_bytes: bytes) -> str:
-    """Расшифровка входящих голосовых сообщений."""
+    """Расшифровка голосовых сообщений пользователей."""
     prompt = (
         "Сделай точную расшифровку этой аудиозаписи в текст. "
-        "Не добавляй от себя никаких комментариев — только произнесенный текст."
+        "Не добавляй никаких комментариев от себя — только произнесенные слова."
     )
     contents = [
         types.Part.from_bytes(data=voice_bytes, mime_type="audio/ogg"),
@@ -245,7 +310,7 @@ async def transcribe_voice(voice_bytes: bytes) -> str:
 
 
 async def process_spontaneous_reply(message: Message, chat_id: int):
-    """Спонтанное появление в чате без спама."""
+    """Спонтанные реплики Паши в беседах без навязчивого спама."""
     now = time.time()
 
     if (now - last_check_time[chat_id] < SPONTANEOUS_COOLDOWN) or (
@@ -267,21 +332,21 @@ async def process_spontaneous_reply(message: Message, chat_id: int):
 
 # --- ПУБЛИКАЦИЯ В КАНАЛ ---
 async def generate_channel_post() -> str | None:
-    """Генерация авторского поста для блога Паши."""
+    """Генерация авторского поста для @potlov_live."""
     post_prompt = f"""{SYSTEM_PERSONA}
 
     ЗАДАЧА: Напиши свежий авторский пост в свой личный Telegram-канал @potlov_live.
-    Поделись одним жизненным наблюдением, байкой из интерната, новостью с улицы Мира или мыслями о жизни.
-    Не вали весь лор кучей, возьми одну простую мысль.
+    Поделись одним жизненным наблюдением, историей из дома-интерната, новостью с улицы Мира или философскими мыслями.
+    Не вали весь лор кучей, возьми одну простую тему.
     Объем: 1–3 небольших абзаца.
     В самом конце своего текста напиши: Связь.
-    (Ссылку на канал внизу сам не пиши, её красиво добавит система)."""
+    (Ссылку на канал внизу сам не пиши, её добавит система)."""
 
     return await make_gemini_request(post_prompt)
 
 
 async def channel_poster_loop(bot: Bot):
-    """Публикация текстовых постов по расписанию: 9:00, 13:00, 17:00, 20:00 MSK."""
+    """Фоновый цикл автопостинга по расписанию: 9:00, 13:00, 17:00, 20:00 MSK."""
     posted_slots = set()
 
     while True:
@@ -319,14 +384,14 @@ async def channel_poster_loop(bot: Bot):
         await asyncio.sleep(30)
 
 
-# --- АДМИН-КОМАНДЫ ДЛЯ ТЕСТИРОВАНИЯ И ГОЛОСОВЫХ В КАНАЛ ---
+# --- КОМАНДЫ УПРАВЛЕНИЯ (ДЛЯ АДМИНА) ---
 @dp.message(F.text == "/post")
 async def cmd_force_post(message: Message, bot: Bot):
-    """Публикация текстового поста в канал по требованию админа."""
-    if message.from_user.id != ADMIN_ID:
+    """Принудительный текстовый пост в канал."""
+    if ADMIN_ID and message.from_user.id != ADMIN_ID:
         return
 
-    await message.reply("Паша обдумывает текстовую байку, секунду...")
+    await message.reply("Паша обдумывает пост, секунду...")
     post_text = await generate_channel_post()
     if post_text:
         clean_channel_name = CHANNEL_ID.lstrip("@")
@@ -341,29 +406,29 @@ async def cmd_force_post(message: Message, bot: Bot):
                 parse_mode="HTML",
                 link_preview_options=LinkPreviewOptions(is_disabled=True),
             )
-            await message.reply("Текстовый пост успешно опубликован в @potlov_live! Связь.")
+            await message.reply("Пост успешно улетел в @potlov_live! Связь.")
         except Exception as e:
-            await message.reply(f"Ошибка отправки: {e}")
+            await message.reply(f"Ошибка отправки в канал: {e}")
     else:
-        await message.reply("Не удалось получить текст от нейросети.")
+        await message.reply("Нейросеть вернула пустой ответ.")
 
 
 @dp.message(F.text.in_({"/vpost", "/voice_post"}))
 async def cmd_force_voice_post(message: Message, bot: Bot):
-    """Публикация голосового сообщения Паши в канал по требованию админа."""
-    if message.from_user.id != ADMIN_ID:
+    """Принудительный голосовой пост со звуками в канал."""
+    if ADMIN_ID and message.from_user.id != ADMIN_ID:
         return
 
-    await message.reply("Паша наговаривает голосовуху в канал, обожди малость...")
+    await message.reply("Паша наговаривает голосовуху в канал, обожди...")
 
     post_text = await generate_channel_post()
     if not post_text:
-        await message.reply("Ошибка: нейросеть не выдала текст.")
+        await message.reply("Ошибка: не удалось сгенерировать текст.")
         return
 
     voice_bytes = await generate_pasha_voice(post_text)
     if not voice_bytes:
-        await message.reply("Ошибка синтеза голоса.")
+        await message.reply("Ошибка при синтезе голоса.")
         return
 
     try:
@@ -377,12 +442,12 @@ async def cmd_force_voice_post(message: Message, bot: Bot):
             caption=caption,
             parse_mode="HTML",
         )
-        await message.reply("Голосовая весточка от Паши улетела в @potlov_live! Связь.")
+        await message.reply("Голосовой пост отправлен в @potlov_live! Связь.")
     except Exception as e:
-        await message.reply(f"Ошибка отправки голосового в канал: {e}")
+        await message.reply(f"Ошибка отправки голосового: {e}")
 
 
-# --- ОБРАБОТЧИКИ СООБЩЕНИЙ В ЧАТАХ ---
+# --- ОБРАБОТЧИКИ СООБЩЕНИЙ В ГРУППАХ ---
 @dp.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}), F.voice)
 async def handle_voice(message: Message, bot: Bot):
     chat_id = message.chat.id
@@ -454,7 +519,7 @@ async def main():
 
     await bot.delete_webhook(drop_pending_updates=True)
 
-    # Фоновая задача автопостинга в канал по расписанию
+    # Фоновая задача автопостинга в канал
     asyncio.create_task(channel_poster_loop(bot))
 
     await dp.start_polling(bot)
