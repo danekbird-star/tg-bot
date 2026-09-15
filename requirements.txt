@@ -40,4 +40,4 @@ aiogram
 google-genai
 python-dotenv
 pydub
-imageio-ffmpeg
+static-ffmpeg
