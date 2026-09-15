@@ -13,21 +13,22 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Настройка ffmpeg ДО импорта pydub для устранения RuntimeWarning
-import imageio_ffmpeg
+# Подключаем static-ffmpeg до импорта pydub
+import static_ffmpeg
 
-ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
-os.environ["PATH"] += os.pathsep + os.path.dirname(ffmpeg_exe)
+static_ffmpeg.add_paths()
 
 from pydub import AudioSegment
-
-AudioSegment.converter = ffmpeg_exe
-AudioSegment.ffmpeg = ffmpeg_exe
-AudioSegment.ffprobe = ffmpeg_exe
-
 from aiogram import Bot, Dispatcher, F
 from aiogram.enums import ChatType
-from aiogram.types import BufferedInputFile, LinkPreviewOptions, Message
+from aiogram.types import (
+    BufferedInputFile,
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    LinkPreviewOptions,
+    Message,
+)
 import edge_tts
 from google import genai
 from google.genai import types
@@ -41,7 +42,7 @@ BOT_USERNAME = "peremoznikbot"
 CHANNEL_ID = "@potlov_live"
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
-# Пути к звуковым файлам
+# Пути к звуковым эффектам
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SOUNDS_DIR = os.path.join(BASE_DIR, "sounds")
 
@@ -55,7 +56,7 @@ CHAT_VOICE_CHANCE = 0.30
 MSK_TZ = ZoneInfo("Europe/Moscow")
 SCHEDULED_HOURS = {9, 13, 17, 20}
 
-# Инициализация Gemini API с пулом ключей
+# Инициализация Gemini API с ротацией ключей
 raw_keys = os.getenv("GEMINI_KEYS", "")
 GEMINI_KEYS = [k.strip() for k in raw_keys.split(",") if k.strip()]
 clients = [genai.Client(api_key=k) for k in GEMINI_KEYS]
@@ -110,7 +111,7 @@ SYSTEM_PERSONA = """Ты — Паша Потлов (в Telegram @PeremoznikBot).
 
 
 async def make_gemini_request(contents: list | str) -> str | None:
-    """Запрос к Gemini с ротацией ключей и обработкой 429."""
+    """Запрос к Gemini с ротацией ключей и защитой от лимитов 429."""
     global current_client_idx, quota_blocked_until
 
     now = time.time()
@@ -174,7 +175,7 @@ def get_random_sound_effect(category: str) -> AudioSegment | None:
         chosen = random.choice(sound_files)
         return AudioSegment.from_file(chosen)
     except Exception as e:
-        logging.error(f"Ошибка загрузки аудиофайла: {e}")
+        logging.error(f"Ошибка загрузки звука {chosen}: {e}")
         return None
 
 
@@ -387,7 +388,137 @@ async def channel_poster_loop(bot: Bot):
         await asyncio.sleep(30)
 
 
-# --- КОМАНДЫ ДЛЯ АДМИНА ---
+# --- ПАНЕЛЬ ТЕСТИРОВАНИЯ И АДМИНКА В ЛИЧКЕ ---
+def get_admin_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура с кнопками для проверки голосовых сообщений."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🎙 Тест обычной байки", callback_data="test_voice_plain"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="💨 Тест звука (пук)", callback_data="test_voice_fart"
+                ),
+                InlineKeyboardButton(
+                    text="👴 Тест звука (кряхтение)", callback_data="test_voice_grunt"
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📢 Текстовый пост в канал", callback_data="btn_post"
+                ),
+                InlineKeyboardButton(
+                    text="🗣 Войс-пост в канал", callback_data="btn_vpost"
+                ),
+            ],
+        ]
+    )
+
+
+@dp.message(F.chat.type == ChatType.PRIVATE, F.text == "/start")
+async def cmd_start_private(message: Message):
+    """Приветствие и вывод кнопок для админа в личных сообщениях."""
+    if ADMIN_ID and message.from_user.id != ADMIN_ID:
+        await message.reply("Здорово, племяш. Работаю помаленьку. Связь.")
+        return
+
+    await message.answer(
+        "👋 Здорово, племяш! Это панель проверки голоса и постов Паши Потлова.\n\n"
+        "Нажимай на кнопки ниже, чтобы протестировать озвучку прямо здесь в личке:",
+        reply_markup=get_admin_keyboard(),
+    )
+
+
+@dp.callback_query(F.data.startswith("test_voice_"))
+async def handle_voice_test_callback(callback: CallbackQuery, bot: Bot):
+    """Обработчик кнопок проверки голосовых сообщений."""
+    if ADMIN_ID and callback.from_user.id != ADMIN_ID:
+        await callback.answer("Только для админа!", show_alert=True)
+        return
+
+    mode = callback.data.replace("test_voice_", "")
+    await callback.answer("Паша наговаривает голосовуху, секунду...")
+
+    # Формируем текст в зависимости от выбранного теста
+    if mode == "fart":
+        test_text = "Ох, племяш, погоди секундочку... *пукнул* Фух, аж в коленях отпустило чи шо. Связь."
+    elif mode == "grunt":
+        test_text = "Тяжело дедов в интернате ворочать... *кряхтит* вся спина колесом пошла, старею. Связь."
+    else:
+        post_generated = await generate_channel_post()
+        test_text = (
+            post_generated
+            or "Здорово, племяш! Вышел на улицу Мира, стою, воздухом дышу, думаю о вечном. Связь."
+        )
+
+    await bot.send_chat_action(chat_id=callback.from_user.id, action="record_voice")
+    voice_bytes = await generate_pasha_voice(test_text)
+
+    if voice_bytes:
+        voice_file = BufferedInputFile(voice_bytes, filename="test_potlov.mp3")
+        await bot.send_voice(
+            chat_id=callback.from_user.id,
+            voice=voice_file,
+            caption=f"📝 <b>Текст озвучки:</b>\n<i>{html.escape(test_text)}</i>",
+            parse_mode="HTML",
+        )
+    else:
+        await bot.send_message(
+            chat_id=callback.from_user.id,
+            text="❌ Ошибка синтеза речи. Проверь логи.",
+        )
+
+
+@dp.callback_query(F.data.in_({"btn_post", "btn_vpost"}))
+async def handle_post_callback(callback: CallbackQuery, bot: Bot):
+    """Публикация в канал по нажатию кнопки."""
+    if ADMIN_ID and callback.from_user.id != ADMIN_ID:
+        await callback.answer("Только для админа!", show_alert=True)
+        return
+
+    await callback.answer("Запускаю публикацию в канал...")
+
+    if callback.data == "btn_post":
+        post_text = await generate_channel_post()
+        if post_text:
+            clean_channel_name = CHANNEL_ID.lstrip("@")
+            channel_link = f'<a href="https://t.me/{clean_channel_name}">Потлов. Подписаться.</a>'
+            safe_post_text = html.escape(post_text)
+            final_message = f"{safe_post_text}\n\n{channel_link}"
+            await bot.send_message(
+                chat_id=CHANNEL_ID,
+                text=final_message,
+                parse_mode="HTML",
+                link_preview_options=LinkPreviewOptions(is_disabled=True),
+            )
+            await bot.send_message(
+                chat_id=callback.from_user.id,
+                text="✅ Текстовый пост успешно отправлен в канал!",
+            )
+    else:
+        post_text = await generate_channel_post()
+        if post_text:
+            voice_bytes = await generate_pasha_voice(post_text)
+            if voice_bytes:
+                clean_channel_name = CHANNEL_ID.lstrip("@")
+                caption = f'<a href="https://t.me/{clean_channel_name}">Потлов. Подписаться.</a>'
+                voice_file = BufferedInputFile(voice_bytes, filename="potlov_live.mp3")
+                await bot.send_voice(
+                    chat_id=CHANNEL_ID,
+                    voice=voice_file,
+                    caption=caption,
+                    parse_mode="HTML",
+                )
+                await bot.send_message(
+                    chat_id=callback.from_user.id,
+                    text="✅ Голосовой пост успешно отправлен в канал!",
+                )
+
+
+# Текстовые команды админа
 @dp.message(F.text == "/post")
 async def cmd_force_post(message: Message, bot: Bot):
     if ADMIN_ID and message.from_user.id != ADMIN_ID:
@@ -411,8 +542,6 @@ async def cmd_force_post(message: Message, bot: Bot):
             await message.reply("Пост отправлен в @potlov_live! Связь.")
         except Exception as e:
             await message.reply(f"Ошибка отправки: {e}")
-    else:
-        await message.reply("Нейросеть вернула пустой ответ.")
 
 
 @dp.message(F.text.in_({"/vpost", "/voice_post"}))
