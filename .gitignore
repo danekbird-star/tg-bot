@@ -1,4 +1,5 @@
 .env
+state.json
+extra_rules.txt
+deploy.ps1
 __pycache__/
-*.pyc
-.venv/
